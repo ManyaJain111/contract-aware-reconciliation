@@ -590,10 +590,16 @@
     </div>
 
     <div class="header-actions">
+      <button class="btn" style="font-size:12px; padding:6px 10px;" onclick="promptApiUrl()">
+        Backend: <span id="api-status-badge" style="color:var(--success); font-weight:600;">Connected</span>
+      </button>
+      <button class="btn" id="nim-key-btn" style="font-size:12px; padding:6px 10px;" onclick="promptNimKey()" title="Set NVIDIA NIM API Key for LLM contract extraction">
+        🤖 NIM: <span id="nim-status-badge" style="color:var(--text-muted); font-weight:600;">Checking…</span>
+      </button>
       <button class="btn btn-dispute" onclick="openDisputeModal()">
         Create Dispute Claim
       </button>
-      <a href="/api/export-audit" class="btn" download>
+      <a id="header-export-btn" href="/api/export-audit" class="btn" download>
         Export Audit (.csv)
       </a>
     </div>
@@ -728,7 +734,7 @@
       <div class="modal-body" id="dispute-content-text">Loading dispute notice...</div>
       <div class="modal-footer">
         <button class="btn" onclick="copyDisputeNotice()">Copy Notice Text</button>
-        <a href="/api/export-audit" class="btn btn-primary" download>Export Dispute Schedule (.csv)</a>
+        <a id="dispute-export-btn" href="/api/export-audit" class="btn btn-primary" download>Export Dispute Schedule (.csv)</a>
       </div>
     </div>
   </div>
@@ -739,10 +745,115 @@
     let expandedTxnId = null;
     let currentSampleId = '1';
     let activeAmendment = null;
+    let apiBase = localStorage.getItem('API_BASE_URL') || window.API_BASE_URL || '';
+
+    function apiUrl(endpoint) {
+      if (!apiBase) return endpoint;
+      const base = apiBase.endsWith('/') ? apiBase.slice(0, -1) : apiBase;
+      const path = endpoint.startsWith('/') ? endpoint : '/' + endpoint;
+      return `${base}${path}`;
+    }
+
+    function updateExportLinks() {
+      const headerBtn = document.getElementById('header-export-btn');
+      if (headerBtn) headerBtn.href = apiUrl('/api/export-audit');
+      const disputeBtn = document.getElementById('dispute-export-btn');
+      if (disputeBtn) disputeBtn.href = apiUrl('/api/export-audit');
+    }
+
+    async function checkNimStatus() {
+      const badge = document.getElementById('nim-status-badge');
+      if (!badge) return;
+      try {
+        const res = await fetch(apiUrl('/api/nim-status'));
+        if (res.ok) {
+          const data = await res.json();
+          if (data.configured) {
+            badge.textContent = data.source === 'runtime' ? 'Key Set ✓' : 'Env Key ✓';
+            badge.style.color = 'var(--success)';
+          } else {
+            badge.textContent = 'No Key';
+            badge.style.color = 'var(--warning)';
+          }
+        } else {
+          badge.textContent = 'Error';
+          badge.style.color = 'var(--danger)';
+        }
+      } catch (e) {
+        badge.textContent = 'Offline';
+        badge.style.color = 'var(--danger)';
+      }
+    }
+
+    async function promptNimKey() {
+      const badge = document.getElementById('nim-status-badge');
+      const entered = prompt(
+        'Enter your NVIDIA NIM API Key (nvapi-...).\n' +
+        'Used for LLM-powered contract extraction (meta/llama-3.1-70b-instruct).\n' +
+        'The key is stored in-memory only and never written to disk.',
+        ''
+      );
+      if (entered === null) return; // User cancelled
+      const key = entered.trim();
+      if (!key) {
+        alert('No key entered. NIM extraction will use offline parser as fallback.');
+        return;
+      }
+      try {
+        const res = await fetch(apiUrl('/api/set-nim-key'), {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({api_key: key})
+        });
+        const data = await res.json();
+        if (res.ok && data.status === 'ok') {
+          if (badge) { badge.textContent = 'Key Set ✓'; badge.style.color = 'var(--success)'; }
+          alert('NVIDIA NIM API key configured ✓\nModel: ' + data.model + '\nYour next PDF upload will use LLM extraction.');
+        } else {
+          alert('Failed to set key: ' + (data.detail || data.error || JSON.stringify(data)));
+        }
+      } catch (e) {
+        alert('Error setting NIM key: ' + e.message);
+      }
+    }
+
+    async function checkBackendHealth() {
+      const badge = document.getElementById('api-status-badge');
+      if (!badge) return;
+      try {
+        const res = await fetch(apiUrl('/health'));
+        if (res.ok) {
+          badge.textContent = apiBase ? 'Remote OK' : 'Local OK';
+          badge.style.color = 'var(--success)';
+        } else {
+          badge.textContent = 'Err ' + res.status;
+          badge.style.color = 'var(--danger)';
+        }
+      } catch (e) {
+        badge.textContent = 'Offline';
+        badge.style.color = 'var(--danger)';
+      }
+    }
+
+    function promptApiUrl() {
+      const entered = prompt('Enter Backend API Base URL (e.g. https://your-backend.onrender.com) or leave empty for same-origin / proxy:', apiBase);
+      if (entered !== null) {
+        apiBase = entered.trim();
+        if (apiBase) {
+          localStorage.setItem('API_BASE_URL', apiBase);
+        } else {
+          localStorage.removeItem('API_BASE_URL');
+        }
+        updateExportLinks();
+        checkBackendHealth();
+        loadCatalog();
+        loadSample(currentSampleId);
+      }
+    }
 
     async function loadCatalog() {
       try {
-        const res = await fetch('/api/sample-pdfs');
+        const res = await fetch(apiUrl('/api/sample-pdfs'));
         const data = await res.json();
         const container = document.getElementById('contract-tabs-container');
         let html = '';
@@ -770,10 +881,11 @@
       const activeTab = document.getElementById(`tab-${sampleId}`);
       if (activeTab) activeTab.classList.add('active');
 
-      document.getElementById('download-stmt-btn').href = `/api/download-statement/${sampleId}`;
+      document.getElementById('download-stmt-btn').href = apiUrl(`/api/download-statement/${sampleId}`);
+      updateExportLinks();
 
       try {
-        const res = await fetch('/api/load-sample', {
+        const res = await fetch(apiUrl('/api/load-sample'), {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({sample_id: sampleId})
@@ -798,7 +910,7 @@
       if (!prompt) return;
 
       try {
-        const res = await fetch('/api/apply-nlp-policy', {
+        const res = await fetch(apiUrl('/api/apply-nlp-policy'), {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({prompt: prompt, sample_id: currentSampleId})
@@ -842,7 +954,7 @@
       try {
         const isPdf = file.name.toLowerCase().endsWith('.pdf');
         const ep = isPdf ? '/api/process-pdf' : '/api/upload-settlement';
-        const res = await fetch(ep, { method: 'POST', body: fd });
+        const res = await fetch(apiUrl(ep), { method: 'POST', body: fd });
         const data = await res.json();
         allRecords = data.records;
         updateHero(data.rules_used, {title: file.name, filename: file.name});
@@ -992,7 +1104,7 @@
       modal.style.display = 'flex';
       text.textContent = 'Generating itemized dispute claim notice from audited exception schedule...';
       try {
-        const res = await fetch('/api/dispute-draft');
+        const res = await fetch(apiUrl('/api/dispute-draft'));
         const data = await res.json();
         text.textContent = data.content || 'No exceptions recorded in current batch.';
       } catch (err) {
@@ -1011,8 +1123,12 @@
     }
 
     // Initialize
+    updateExportLinks();
+    checkBackendHealth();
+    checkNimStatus();
     loadCatalog();
     loadSample('1');
+
   </script>
 </body>
 </html>
